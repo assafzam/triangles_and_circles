@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -97,7 +98,7 @@ class GImage:
         draw_image = pred_boxes.draw_on_image(image_to_draw_on, single_color=self.pred_color, thickness=1, show=show)
         return draw_image
 
-    def get_pred_boxes(self):
+    def get_pred_boxes(self) -> GBoxesOnImage:
         if self.raw_pred is None:
             self.load_raw_pred()
         circles = self.raw_pred.get('circle')
@@ -123,7 +124,7 @@ class GImage:
         draw_image = gboxes.draw_on_image(image_to_draw_on, single_color=self.gt_color, thickness=3, show=show)
         return draw_image
 
-    def get_gt_boxes(self):
+    def get_gt_boxes(self) -> GBoxesOnImage:
         if self.raw_gt is None:
             self.load_raw_gt()
         circles = self.raw_gt.get('circle')
@@ -150,10 +151,7 @@ class GImage:
             logger.warning(f"json file does not exist in {path}")
             return {}
 
-    def get_FP_TP(self, class_name = 'circle', iou_threshold = 0.8):
-
-
-
+    def get_FP_TP_by_class(self, class_name = 'circle', iou_threshold = 0.8):
 
         pred_boxes = [p for p in  self.get_pred_boxes() if p.class_name==class_name]
         gt_boxes = [p for p in self.get_gt_boxes() if p.class_name==class_name]
@@ -182,13 +180,110 @@ class GImage:
 
         return FP, TP
 
+    def get_FP_TP(self, iou_threshold = 0.8 ):
+        pred_boxes = self.get_pred_boxes()
+        gt_boxes = self.get_gt_boxes()
 
+        TP = np.zeros(len(pred_boxes))
+        FP = np.zeros(len(pred_boxes))
+        total_true_boxes = len(gt_boxes)
+
+        already_seen = np.zeros(len(gt_boxes))
+            # class_pred_boxes = [p for p in pred_boxes if p.class_name==c]
+            # class_gt_boxes = [p for p in gt_boxes if p.class_name==c]
+        for pred_idx, pred_box in enumerate(pred_boxes):
+            iouMax = sys.float_info.min
+            gt_max_idx = None
+            for gt_idx, gt_box in enumerate(gt_boxes):
+                if gt_box.class_name != pred_box.class_name:
+                    continue
+                iou = pred_box.iou(gt_box)
+                if iou > iouMax:
+                    iouMax = iou
+                    gt_max_idx= gt_idx
+            if iouMax >= iou_threshold:
+                if already_seen[gt_max_idx] == 0: # not seen
+                    TP[pred_idx] = 1 # count as true positive
+                    already_seen[gt_max_idx] = 1  # flag as already 'seen'
+                else:
+                    FP[pred_idx] = 1  # count as false positive
+            else:
+                FP[pred_idx] = 1  # count as false positive
+
+        return FP, TP
+
+class AlLData:
+    def __init__(self, data_dir):
+        self.data_dir = data_dir
+        self.FP = defaultdict(lambda : np.array([]))
+        self.TP = defaultdict(lambda : np.array([]))
+
+        self.acc_FP = {}
+        self.acc_TP = {}
+        self.acc_recall = {}
+        self.recall_num = {}
+        self.acc_precision = {}
+        self.precision_num = {}
+        self.ap = {}
+
+        self.FP_by_class = {}
+        self.TP_by_class = {}
+
+        self.num_of_gt, self.num_of_predictions = self.calc_amounts()
+        self.iou_thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        self.all_classes = ['circle', 'triangle']
+
+    def calc_amounts(self):
+        img_dir = os.path.join(data_dir, IMG_DIR)
+        num_of_gt = 0
+        num_of_predictions = 0
+        for img_name in os.listdir(img_dir):
+            file_name = os.path.splitext(img_name)[0]
+            image = GImage(data_dir=data_dir, name=file_name)
+            num_of_gt += len(image.get_gt_boxes())
+            num_of_predictions += len(image.get_pred_boxes())
+        return num_of_gt, num_of_predictions
+
+    def run(self):
+        img_dir = os.path.join(data_dir, IMG_DIR)
+        fig = plt.figure()
+        for iou_threshold in self.iou_thresholds:
+
+            for img_name in os.listdir(img_dir):
+                file_name = os.path.splitext(img_name)[0]
+                image = GImage(data_dir=data_dir, name=file_name)
+
+                img_FP, img_TP = image.get_FP_TP(iou_threshold)
+                self.FP[iou_threshold] = np.concatenate((self.FP[iou_threshold], img_FP))
+                self.TP[iou_threshold] = np.concatenate((self.TP[iou_threshold], img_TP))
+
+            self.acc_FP[iou_threshold] = np.cumsum(self.FP[iou_threshold])
+            self.acc_TP[iou_threshold] = np.cumsum(self.TP[iou_threshold])
+            self.acc_recall[iou_threshold] = self.acc_TP[iou_threshold] / self.num_of_gt
+            self.recall_num[iou_threshold] = np.sum(self.TP[iou_threshold]) / self.num_of_gt
+
+            self.acc_precision[iou_threshold] = np.divide(self.acc_TP[iou_threshold], (self.acc_FP[iou_threshold] + self.acc_TP[iou_threshold]))
+            self.precision_num[iou_threshold] = np.sum(self.TP[iou_threshold]) / (np.sum(self.FP[iou_threshold]) + np.sum(self.TP[iou_threshold]))
+
+            self.ap[iou_threshold], _, _, _ = Evaluator.CalculateAveragePrecision(self.acc_recall,  self.acc_precision)
+
+            plt.plot(self.acc_recall[iou_threshold], self.acc_precision[iou_threshold], label=iou_threshold)
+        plt.legend()
+        plt.title('recall/precision')
+        plt.xlabel('recall')
+        plt.ylabel('precision')
+        plt.show()
 
 
 
 
 if __name__ == '__main__':
     data_dir = 'data'
+    data = AlLData(data_dir=data_dir)
+    data.run()
+    print('h')
+
+
     img_dir = os.path.join(data_dir, IMG_DIR)
     all_fp = np.array([])
     all_tp = np.array([])
